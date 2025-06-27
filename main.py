@@ -1,12 +1,12 @@
 from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker, Session
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
-from jose import jwt
+from jose import jwt,JWTError
 # app = FastAPI()
 
 DATABASE_URL = "sqlite:///./taskmanager.db"
@@ -26,6 +26,16 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password = Column(String, nullable=False)
+    tasks = relationship("Task", back_populates="user", cascade="all, delete-orphan")
+    
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(100), nullable=False)
+    description = Column(String(255), nullable=True)
+    done = Column(Integer, default=0)
+    owner_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    user = relationship("User", back_populates="tasks")
    
 class RegisterUser(BaseModel):
     username: str
@@ -34,7 +44,12 @@ class RegisterUser(BaseModel):
 class Token(BaseModel):
     message: str
     access_token: str
-    token_type: str  
+    token_type: str
+    
+class TaskCreate(BaseModel):
+    title: str
+    description: str = None
+    done: int = 0  
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
@@ -51,6 +66,19 @@ def create_access_token(data: dict):
     expire = datetime.now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        user = db.query(User).filter(User.username == username).first()
+        if user is None:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         
 @app.post("/register",response_model=Token)
 async def register(user: RegisterUser, db: Session = Depends(get_db)):
@@ -76,5 +104,64 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
             raise HTTPException(status_code=401, detail="Invalid credentials")
         access_token = create_access_token(data={"sub": existing_user.username})
         return Token(message="Login successful", access_token=access_token, token_type="bearer")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/tasks", response_model=TaskCreate)
+def create_task(task: TaskCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        new_task = Task(title=task.title, description=task.description, owner_id=current_user.id)
+        db.add(new_task)
+        db.commit()
+        db.refresh(new_task)
+        return new_task
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/tasks", response_model=list[TaskCreate])
+def get_tasks(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        tasks = db.query(Task).filter(Task.owner_id == current_user.id).all()
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/tasks/{task_id}", response_model=TaskCreate)
+def update_task(task_update:TaskCreate, task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        task= db.query(Task).filter(Task.id == task_id, Task.owner_id == current_user.id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        task.title = task_update.title
+        task.description = task_update.description
+        db.commit()
+        db.refresh(task)
+        return task
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        task = db.query(Task).filter(Task.id == task_id, Task.owner_id == current_user.id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        db.delete(task)
+        db.commit()
+        return {"message": "Task deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.patch("/tasks/{task_id}/done")
+def mark_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        task = db.query(Task).filter(Task.id == task_id, Task.owner_id == current_user.id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        task.done = not task.done
+        db.commit()
+        # db.refresh(task)
+        status_msg = "done" if task.done else "undone"
+        return {"message": f"Task marked as {status_msg}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
