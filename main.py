@@ -1,13 +1,14 @@
 from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker, Session
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 from jose import jwt,JWTError
-# app = FastAPI()
+from typing import Optional
+
 
 DATABASE_URL = "sqlite:///./taskmanager.db"
 SECRET_KEY = "secret"
@@ -33,14 +34,14 @@ class Task(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(100), nullable=False)
     description = Column(String(255), nullable=True)
-    done = Column(Integer, default=0)
+    done = Column(Boolean, default=0)
     owner_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     user = relationship("User", back_populates="tasks")
    
 class RegisterUser(BaseModel):
     username: str
     password: str
-  
+ 
 class Token(BaseModel):
     message: str
     access_token: str
@@ -49,7 +50,8 @@ class Token(BaseModel):
 class TaskCreate(BaseModel):
     title: str
     description: str = None
-    done: int = 0  
+    done: Optional[bool] = False 
+       
 
 app = FastAPI()
 Base.metadata.create_all(bind=engine)
@@ -78,7 +80,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             raise HTTPException(status_code=401, detail="User not found")
         return user
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        raise HTTPException(status_code=401, detail="Invalid token")
         
 @app.post("/register",response_model=Token)
 async def register(user: RegisterUser, db: Session = Depends(get_db)):
